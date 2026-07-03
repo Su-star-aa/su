@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>弹幕躲避 · 数码动作小游戏</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#0a0a1a;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  min-height:100vh;
+  font-family:'Segoe UI',system-ui,sans-serif;
+  overflow:hidden;
+}
+.game-wrapper{
+  position:relative;
+  border:2px solid #2a2a5a;
+  border-radius:12px;
+  box-shadow:0 0 40px rgba(80,80,255,0.2);
+}
+canvas{
+  display:block;
+  border-radius:10px;
+  background:#0d0d24;
+  cursor:crosshair;
+}
+#ui-overlay{
+  position:absolute;top:0;left:0;right:0;
+  display:flex;justify-content:space-between;
+  padding:14px 20px;
+  pointer-events:none;
+  color:#c8d0ff;
+  font-size:15px;
+  text-shadow:0 0 8px rgba(0,0,0,0.7);
+}
+#ui-overlay span{background:rgba(0,0,0,0.4);padding:4px 12px;border-radius:6px;}
+#score,#high-score{font-variant-numeric:tabular-nums;}
+#start-screen{
+  position:absolute;inset:0;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  color:#d0d8ff;text-align:center;
+  pointer-events:none;
+  z-index:2;
+}
+#start-screen h1{
+  font-size:34px;font-weight:600;
+  margin-bottom:4px;
+  letter-spacing:1px;
+  background:linear-gradient(135deg,#6a8aff,#c084fc);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+#start-screen p{font-size:14px;opacity:0.7;margin-bottom:4px;}
+#start-screen .hint-blink{
+  font-size:13px;opacity:0.5;
+  animation:blink 1.2s ease-in-out infinite;
+  margin-top:10px;
+}
+@keyframes blink{0%,100%{opacity:0.5}50%{opacity:0.15}}
+#start-screen .keyhint{
+  display:flex;gap:20px;font-size:12px;opacity:0.35;
+  margin-top:6px;
+}
+#start-screen .keyhint kbd{
+  background:rgba(255,255,255,0.08);
+  padding:2px 8px;border-radius:4px;
+  font-family:inherit;font-size:12px;
+}
+#game-over{
+  position:absolute;inset:0;
+  display:none;flex-direction:column;
+  align-items:center;justify-content:center;
+  color:#d0d8ff;text-align:center;
+  background:rgba(0,0,0,0.65);
+  backdrop-filter:blur(3px);
+  border-radius:10px;
+  z-index:2;
+}
+#game-over.show{display:flex;}
+#game-over h2{font-size:28px;margin-bottom:4px;}
+#game-over p{font-size:14px;opacity:0.7;margin-bottom:8px;}
+#game-over .hint-blink{
+  font-size:12px;opacity:0.4;
+  animation:blink 1.2s ease-in-out infinite;
+  margin-bottom:16px;
+}
+#restart-btn{
+  background:linear-gradient(135deg,#4a6ae0,#7c5cff);
+  border:none;color:#fff;font-size:16px;
+  padding:10px 32px;border-radius:30px;
+  cursor:pointer;pointer-events:auto;
+  transition:transform .15s,box-shadow .15s;
+  box-shadow:0 0 20px rgba(80,80,255,0.3);
+}
+#restart-btn:hover{transform:scale(1.05);box-shadow:0 0 30px rgba(80,80,255,0.5);}
+</style>
+</head>
+<body>
+<div class="game-wrapper">
+  <canvas id="game" width="600" height="450"></canvas>
+  <div id="ui-overlay" style="display:none">
+    <span>分数 <span id="score">0</span></span>
+    <span>最高 <span id="high-score">0</span></span>
+  </div>
+  <div id="start-screen">
+    <h1>弹幕躲避</h1>
+    <p>尽可能久地生存下去</p>
+    <div class="hint-blink">按任意键开始</div>
+    <div class="keyhint">
+      <span><kbd>W A S D</kbd> 或 <kbd>↑ ← ↓ →</kbd></span>
+      <span><kbd>Space</kbd> 冲刺</span>
+    </div>
+  </div>
+  <div id="game-over">
+    <h2>游戏结束</h2>
+    <p>得分: <span id="final-score">0</span></p>
+    <div class="hint-blink">按任意键重新开始</div>
+    <button id="restart-btn">再来一局</button>
+  </div>
+</div>
+
+<script>
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const W=600,H=450;
+
+const scoreEl=document.getElementById('score');
+const highScoreEl=document.getElementById('high-score');
+const uiOverlay=document.getElementById('ui-overlay');
+const startScreen=document.getElementById('start-screen');
+const gameOverEl=document.getElementById('game-over');
+const finalScoreEl=document.getElementById('final-score');
+const restartBtn=document.getElementById('restart-btn');
+
+// ---- state machine ----
+let state='menu'; // menu | playing | over
+let score=0,highScore=0,tick=0,menuTime=0;
+const keys={};
+let player,enemies,particles,trails,menuParticles;
+
+// ---- constants ----
+const BASE_SPEED=130;
+const PLAYER_R=8;
+const DASH_DUR=0.18;
+const DASH_COOLDOWN=0.6;
+const DASH_SPEED_MUL=3.2;
+
+// ---- input ----
+function handleStart(e){
+  if(state==='menu'){
+    startGame();
+    if(e.key)e.preventDefault();
+  }else if(state==='over'){
+    startGame();
+    if(e.key)e.preventDefault();
+  }
+}
+document.addEventListener('keydown',e=>{
+  keys[e.key.toLowerCase()]=true;
+  if(e.key===' '){
+    e.preventDefault();
+    if(state==='menu'||state==='over')handleStart(e);
+    else if(state==='playing')dash();
+  }
+  if(e.key.length===1&&state!=='playing')handleStart(e);
+  if(e.key==='Enter'&&state!=='playing')handleStart(e);
+});
+document.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+canvas.addEventListener('click',handleStart);
+canvas.addEventListener('touchstart',handleStart,{passive:true});
+
+// ---- entities ----
+function initPlayer(){
+  player={
+    x:W/2,y:H/2,r:PLAYER_R,
+    vx:0,vy:0,
+    dashT:0,dashCooldown:0,
+    invincible:0,
+  };
+}
+
+function spawnEnemy(){
+  const edge=Math.floor(Math.random()*4);
+  let x,y;
+  const side=Math.random()*200+30;
+  if(edge===0){x=-side;y=Math.random()*H;}
+  else if(edge===1){x=W+side;y=Math.random()*H;}
+  else if(edge===2){x=Math.random()*W;y=-side;}
+  else{x=Math.random()*W;y=H+side;}
+  const angle=Math.atan2(player.y-y,player.x-x)
+    +(Math.random()-0.5)*0.8;
+  const spd=40+Math.random()*60+Math.min(score/400,50);
+  enemies.push({
+    x,y,r:5+Math.random()*3,
+    vx:Math.cos(angle)*spd,
+    vy:Math.sin(angle)*spd,
+    hue:Math.random()*60+200,
+  });
+}
+
+function spawnParticles(x,y,color,count=14){
+  for(let i=0;i<count;i++){
+    const a=Math.random()*Math.PI*2;
+    const s=60+Math.random()*100;
+    particles.push({
+      x,y,
+      vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+      life:0.5+Math.random()*0.4,
+      maxLife:0.5+Math.random()*0.4,
+      r:1.5+Math.random()*2.5,
+      color,
+    });
+  }
+}
+
+function spawnMenuParticle(){
+  if(Math.random()>0.4)return;
+  menuParticles.push({
+    x:Math.random()*W,y:Math.random()*H,
+    vx:(Math.random()-0.5)*20,
+    vy:(Math.random()-0.5)*20,
+    life:0.8+Math.random()*1.2,
+    maxLife:0.8+Math.random()*1.2,
+    r:1+Math.random()*2,
+  });
+}
+
+function spawnTrail(){
+  trails.push({
+    x:player.x,y:player.y,
+    life:0.35,maxLife:0.35,
+    r:player.r*0.6,
+  });
+}
+
+function dash(){
+  if(player.dashCooldown>0||player.dashT>0)return;
+  player.dashT=DASH_DUR;
+  player.dashCooldown=DASH_COOLDOWN;
+  const dx=player.vx||0,dy=player.vy||0;
+  const len=Math.hypot(dx,dy);
+  if(len>10){
+    player.vx=(dx/len)*DASH_SPEED_MUL*BASE_SPEED;
+    player.vy=(dy/len)*DASH_SPEED_MUL*BASE_SPEED;
+  }else{
+    player.vx=0;player.vy=0;
+  }
+}
+
+// ---- game flow ----
+function startGame(){
+  initPlayer();
+  enemies=[];particles=[];trails=[];
+  score=0;tick=0;
+  state='playing';
+  startScreen.style.display='none';
+  gameOverEl.classList.remove('show');
+  uiOverlay.style.display='flex';
+}
+
+function gameOver(){
+  state='over';
+  if(score>highScore){
+    highScore=score;
+    highScoreEl.textContent=Math.floor(highScore);
+  }
+  finalScoreEl.textContent=Math.floor(score);
+  gameOverEl.classList.add('show');
+}
+
+// ---- update ----
+function update(dt){
+  if(state!=='playing')return;
+  tick+=dt;
+
+  // spawn enemies — faster over time
+  const spawnRate=Math.max(0.12,0.6-score/5000);
+  if(Math.random()<dt/spawnRate)spawnEnemy();
+
+  // player input
+  let mx=0,my=0;
+  if(keys['a']||keys['arrowleft'])mx=-1;
+  if(keys['d']||keys['arrowright'])mx=1;
+  if(keys['w']||keys['arrowup'])my=-1;
+  if(keys['s']||keys['arrowdown'])my=1;
+  const len=Math.hypot(mx,my);
+  const spd=player.dashT>0?DASH_SPEED_MUL*BASE_SPEED:BASE_SPEED;
+  if(len>0.1){
+    player.vx+=(mx/len*spd-player.vx)*Math.min(1,dt*12);
+    player.vy+=(my/len*spd-player.vy)*Math.min(1,dt*12);
+  }else{
+    player.vx*=Math.pow(0.01,dt);
+    player.vy*=Math.pow(0.01,dt);
+  }
+
+  player.x+=player.vx*dt;
+  player.y+=player.vy*dt;
+  player.x=Math.max(player.r,Math.min(W-player.r,player.x));
+  player.y=Math.max(player.r,Math.min(H-player.r,player.y));
+
+  // dash timer
+  if(player.dashT>0){
+    player.dashT-=dt;
+    if(player.dashT<=0){
+      player.dashT=0;
+      if(len>0.1){player.vx=mx/len*BASE_SPEED;player.vy=my/len*BASE_SPEED;}
+      else{player.vx=0;player.vy=0;}
+    }
+  }
+  if(player.dashCooldown>0)player.dashCooldown-=dt;
+  if(player.invincible>0)player.invincible-=dt;
+
+  // trail
+  if(Math.hypot(player.vx,player.vy)>40)spawnTrail();
+
+  // enemies
+  for(let i=enemies.length-1;i>=0;i--){
+    const e=enemies[i];
+    e.x+=e.vx*dt;e.y+=e.vy*dt;
+    const margin=100;
+    if(e.x<-margin||e.x>W+margin||e.y<-margin||e.y>H+margin){
+      enemies.splice(i,1);continue;
+    }
+    const dx=e.x-player.x,dy=e.y-player.y;
+    if(Math.hypot(dx,dy)<player.r+e.r&&player.invincible<=0){
+      spawnParticles(player.x,player.y,'#ff6a8a',28);
+      gameOver();
+      return;
+    }
+  }
+
+  // particles
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx*dt;p.y+=p.vy*dt;
+    p.vx*=0.97;p.vy*=0.97;
+    p.life-=dt;
+    if(p.life<=0)particles.splice(i,1);
+  }
+
+  // trails
+  for(let i=trails.length-1;i>=0;i--){
+    const t=trails[i];
+    t.life-=dt;
+    if(t.life<=0)trails.splice(i,1);
+  }
+
+  score+=dt*10;
+  scoreEl.textContent=Math.floor(score);
+}
+
+function updateMenu(dt){
+  menuTime+=dt;
+  spawnMenuParticle();
+  for(let i=menuParticles.length-1;i>=0;i--){
+    const p=menuParticles[i];
+    p.x+=p.vx*dt;p.y+=p.vy*dt;
+    p.life-=dt;
+    if(p.life<=0||p.x<-20||p.x>W+20||p.y<-20||p.y>H+20)
+      menuParticles.splice(i,1);
+  }
+  // animate player idle pulse
+  if(player)player.pulse=0.8+0.2*Math.sin(menuTime*3);
+}
+
+// ---- render ----
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  // grid
+  ctx.strokeStyle='rgba(60,60,140,0.12)';
+  ctx.lineWidth=1;
+  for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+  if(state==='menu'){
+    drawMenuAmbient();
+    drawPlayer();
+    return;
+  }
+
+  // trails
+  for(const t of trails){
+    const a=t.life/t.maxLife;
+    ctx.beginPath();ctx.arc(t.x,t.y,t.r*a,0,Math.PI*2);
+    ctx.fillStyle=`rgba(100,160,255,${a*0.25})`;
+    ctx.fill();
+  }
+
+  // enemies
+  for(const e of enemies){
+    const r=e.r;
+    ctx.beginPath();ctx.arc(e.x,e.y,r,0,Math.PI*2);
+    const g=ctx.createRadialGradient(e.x-2,e.y-2,0,e.x,e.y,r+6);
+    g.addColorStop(0,`hsl(${e.hue},90%,65%)`);
+    g.addColorStop(1,`hsla(${e.hue},90%,65%,0)`);
+    ctx.fillStyle=g;ctx.fill();
+    ctx.beginPath();ctx.arc(e.x,e.y,r*0.6,0,Math.PI*2);
+    ctx.fillStyle=`hsl(${e.hue},80%,85%)`;
+    ctx.fill();
+  }
+
+  if(state==='over')return;
+  drawPlayer();
+
+  // particles above player
+  for(const p of particles){
+    const a=p.life/p.maxLife;
+    ctx.globalAlpha=a;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r*a,0,Math.PI*2);
+    ctx.fillStyle=p.color||'#ff8aae';ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawMenuAmbient(){
+  // floating dots
+  for(const p of menuParticles){
+    const a=p.life/p.maxLife;
+    ctx.globalAlpha=a*0.4;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+    ctx.fillStyle='#8899ff';ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawPlayer(){
+  if(!player)return;
+  const px=player.x,py=player.y;
+  const pulse=player.pulse||1;
+
+  // invincible flash
+  if(player.invincible>0&&Math.floor(player.invincible*12)%2)return;
+
+  // dash ring
+  if(player.dashT>0){
+    ctx.beginPath();ctx.arc(px,py,player.r+12,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(255,255,255,${player.dashT/DASH_DUR*0.5})`;
+    ctx.lineWidth=2;ctx.stroke();
+  }
+
+  // glow
+  const gr=player.r+10*pulse;
+  const g=ctx.createRadialGradient(px-2,py-2,0,px,py,gr);
+  g.addColorStop(0,`rgba(160,200,255,${0.4*pulse})`);
+  g.addColorStop(1,'rgba(160,200,255,0)');
+  ctx.beginPath();ctx.arc(px,py,gr,0,Math.PI*2);
+  ctx.fillStyle=g;ctx.fill();
+
+  // body
+  ctx.beginPath();ctx.arc(px,py,player.r*pulse,0,Math.PI*2);
+  ctx.fillStyle='#c8e0ff';ctx.fill();
+  ctx.strokeStyle='#8ab4ff';ctx.lineWidth=2;ctx.stroke();
+
+  // inner highlight
+  ctx.beginPath();ctx.arc(px-2,py-2,3,0,Math.PI*2);
+  ctx.fillStyle='#ffffff';ctx.fill();
+}
+
+// ---- main loop ----
+let last=0;
+function loop(ts){
+  const dt=Math.min((ts-last)/1000,0.05);
+  last=ts;
+
+  if(state==='menu'){
+    updateMenu(dt);
+    draw();
+  }else if(state==='playing'){
+    update(dt);
+    draw();
+  }else{
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---- start ----
+restartBtn.addEventListener('click',()=>startGame());
+initPlayer();
+player.pulse=1;
+enemies=[];particles=[];trails=[];menuParticles=[];
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
